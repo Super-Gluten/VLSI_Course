@@ -1,0 +1,247 @@
+% !TEX program = xelatex
+\documentclass[12pt,a4paper]{ctexart}
+
+% ==================== 页面设置 ====================
+\usepackage[top=2.5cm, bottom=2.5cm, left=2.5cm, right=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{tikz}
+\usepackage{caption}
+\usepackage{float}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue,
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{实验2：FPGA布局算法}
+\fancyhead[R]{VLSI-FPGA}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ==================== 标题 ====================
+\title{\textbf{实验2：FPGA 布局算法实验报告}\\[4pt]\large 基于模拟退火的 HPWL 最小化布局}
+\author{23336345 周海铭}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{fancy}
+
+% ==================== 摘要 ====================
+\begin{abstract}
+本实验基于模拟退火（Simulated Annealing, SA）算法实现了 FPGA 布局优化，目标是最小化总线长（Total HPWL）。
+算法采用双策略扰动机制（交换 + 移动）、增量 HPWL 代价评估以及几何冷却策略。
+在 7 个不同规模的 benchmark 数据集上（80~2000 个元件），所有结果均通过布局合法性验证（0 错误），
+线长优化幅度达 40\%\textasciitilde60\%。
+\end{abstract}
+
+% ==================== 一、算法逻辑与实现思路 ====================
+\section{算法逻辑与实现思路}
+
+\subsection{问题建模}
+
+FPGA 布局问题可形式化为：给定 $W \times H$ 的 FPGA 网格、一组固定 I/O 模块（不可移动）和一组可移动逻辑模块，以及模块间的线网连接关系，
+求一个从可移动模块到空闲 Block 坐标的映射，使得目标函数最小：
+
+\begin{equation}
+\text{Minimize: } \Phi = \sum_{\text{all nets } n} \text{HPWL}(n)
+\label{eq:objective}
+\end{equation}
+
+其中 HPWL（Half-Perimeter Wire Length）定义为线网连接的所有模块的包围盒半周长：
+
+\begin{equation}
+\text{HPWL}(n) = \bigl(\max_{i \in n} x_i - \min_{i \in n} x_i\bigr) + \bigl(\max_{i \in n} y_i - \min_{i \in n} y_i\bigr)
+\label{eq:hpwl}
+\end{equation}
+
+约束条件包括：(1) 固定模块坐标不可改变；(2) 每个 Block 最多容纳 1 个 Instance（$\text{MAX\_BLOCK\_CAPACITY}=1$）；(3) Instance 坐标与 FPGA Block 状态必须双向联动。
+
+\subsection{算法选择：模拟退火}
+
+FPGA 布局是 NP-hard 组合优化问题，解空间随模块数呈阶乘增长。模拟退火算法通过概率接受劣解来跳出局部最优，是学术界标准 FPGA 布局工具 VPR 的核心布局引擎。
+相比解析法（二次布局 + 递归二分），SA 实现更简洁、对离散约束的处理更自然。
+
+\subsection{算法流程}
+
+\begin{enumerate}[label=\textbf{步骤 \arabic*:}, leftmargin=*]
+    \item \textbf{数据收集}：遍历 \texttt{glb\_inst\_map} 分离固定和可移动 Instance；遍历 \texttt{glb\_fpga} 收集空闲 Block 坐标。
+    \item \textbf{随机初始布局}：将 $N$ 个可移动 Instance 随机分配到 $M$ 个空闲 Block 中的 $N$ 个（$M \ge N$），剩余 $M-N$ 个 Block 保持空闲。
+    \item \textbf{SA 主循环}：温度从 $T_0$ 几何冷却至 $T_{\min}$，每个温度下执行 $N \times 10$ 次扰动尝试。
+\end{enumerate}
+
+\subsection{约束处理}
+
+本问题的三项约束及其处理方式如下：
+
+\begin{enumerate}[label=(\arabic*), leftmargin=*]
+    \item \textbf{固定模块不可移动}：\texttt{Instance::setPosition()} 内部检查 \texttt{isFixed()} 标志，
+          对固定模块（I/O Block）调用时输出警告并忽略操作。SA 扰动时仅从 \texttt{movable\_insts} 列表中选取，
+          从根本上避免修改固定模块坐标。
+
+    \item \textbf{Block 容量限制}（$\text{MAX\_BLOCK\_CAPACITY}=1$）：通过维护
+          \texttt{occupied\_slots}（已占用位置列表）和 \texttt{free\_slots}（空闲位置列表）
+          两个数据结构来保证。每次扰动后执行 \texttt{glb\_fpga.clearInst()} +
+          \texttt{glb\_fpga.addInst()} 原子式更新 Block 状态，天然保证每个 Block 至多容纳一个 Instance。
+
+    \item \textbf{Block-Instance 双向联动}：交换/移动操作中同时更新 Instance 坐标
+          （\texttt{setPosition()}）和 FPGA Block 的 \texttt{contain} 列表，
+          确保 \texttt{reportValid()} 从 Instance→Block 和 Block→Instance 两个方向检查均一致。
+          所有 7 个数据集均通过验证（0 错误）。
+\end{enumerate}
+
+\subsection{扰动策略}
+
+本算法采用\textbf{双策略混合扰动}机制：
+
+\begin{table}[H]
+\centering
+\caption{扰动策略对比}
+\begin{tabular}{@{}p{2.5cm}p{5cm}p{5cm}@{}}
+\toprule
+\textbf{策略} & \textbf{操作} & \textbf{适用场景} \\
+\midrule
+交换（Swap）70\% & 随机选取两个已放置的 Instance，交换其坐标 & 局部精细调整，保持 Block 占用集合不变 \\
+移动（Move）30\% & 随机选取一个已放置的 Instance，将其移至随机空闲 Block & 全局探索，改变 Block 占用集合，跳出局部最优 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+每次扰动后执行 FPGA Block 双向联动：\texttt{glb\_fpga.clearInst()} $\rightarrow$ \texttt{glb\_fpga.addInst()}，
+同时更新 Instance 的 \texttt{setPosition()}。这天然保证了 Block 容量约束。
+
+\subsection{增量代价计算}
+
+为避免每次迭代全量重算 HPWL，仅评估包含被交换/移动 Instance 的 Net 集合：
+
+\begin{equation}
+\Delta\Phi = \sum_{n \in \mathcal{N}_a \cup \mathcal{N}_b} \bigl(\text{HPWL}_{\text{new}}(n) - \text{HPWL}_{\text{old}}(n)\bigr)
+\label{eq:delta}
+\end{equation}
+
+其中 $\mathcal{N}_a$、$\mathcal{N}_b$ 分别为 Instance $a$ 和 $b$ 所连接的 Net 集合。
+复杂度从 $O(|\text{Nets}| \cdot d)$ 降至 $O(k \cdot d)$，$k \ll |\text{Nets}|$。
+
+\subsection{接受准则}
+
+\begin{equation}
+P(\text{accept}) = 
+\begin{cases}
+1, & \Delta\Phi \le 0 \\[4pt]
+\exp\bigl(-\frac{\Delta\Phi}{T}\bigr), & \Delta\Phi > 0
+\end{cases}
+\label{eq:accept}
+\end{equation}
+
+\subsection{SA 参数设计}
+
+\begin{table}[H]
+\centering
+\caption{SA 参数配置}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{参数} & \textbf{公式/值} & \textbf{说明} \\
+\midrule
+初始温度 $T_0$ & $\max(\Phi_{\text{initial}} \times 0.2,\; 100)$ & 自适应，使初始接受概率 $\approx 80\%$ \\
+冷却系数 $\alpha$ & $0.95$ & 几何冷却 $T_{k+1} = \alpha \cdot T_k$ \\
+终止温度 $T_{\min}$ & $T_0 \times 0.95^{150}$ & 约 150 次降温后终止 \\
+内循环次数 & $N \times 10$ & 与可移动模块数量成正比 \\
+提前终止阈值 & $N \times 50$ 连续拒绝 & 陷入局部最优时跳出 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{创新点}
+
+\begin{enumerate}[label=(\arabic*), leftmargin=*]
+    \item \textbf{双策略混合扰动}：交换 + 移动组合，使 SA 既能精细调优又能全局探索，特别适用于空闲 Block 多于可移动 Instance 的场景（$M > N$）
+    \item \textbf{自适应初始温度}：基于初始代价动态设定 $T_0$，避免手工调参
+    \item \textbf{增量 HPWL 评估}：仅重算受影响 Net，大幅提升大规模数据集的运行效率
+\end{enumerate}
+
+% ==================== 二、运行结果 ====================
+\section{运行结果}
+
+所有数据集均通过 \texttt{reportValid()} 验证（0 错误），布局完全合法。
+
+\begin{table}[H]
+\centering
+\caption{各数据集最终 HPWL 结果}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+\textbf{数据集} & \textbf{元件数量} & \textbf{FPGA 尺寸} & \textbf{固定模块} & \textbf{可移动模块} & \textbf{最终 HPWL} \\
+\midrule
+\texttt{small.txt}  & $\sim$80   & $10\times10$ & 25  & 51   & \textbf{455}   \\
+\texttt{med1.txt}   & $\sim$320  & $20\times20$ & 57  & 259  & \textbf{4268}  \\
+\texttt{med2.txt}   & $\sim$360  & $20\times20$ & 64  & 291  & \textbf{4889}  \\
+\texttt{lg1.txt}    & $\sim$720  & $30\times30$ & 89  & 627  & \textbf{17060} \\
+\texttt{lg2.txt}    & $\sim$810  & $30\times30$ & 100 & 705  & \textbf{20154} \\
+\texttt{xl.txt}     & $\sim$1280 & $40\times40$ & 121 & 1155 & \textbf{47569} \\
+\texttt{huge.txt}   & $\sim$2000 & $50\times50$ & 153 & 1843 & \textbf{107947} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ==================== 三、实验总结 ====================
+\section{实验总结}
+
+\subsection{方法优点}
+
+\begin{enumerate}[label=(\arabic*), leftmargin=*]
+    \item \textbf{实现简洁}：核心 SA 逻辑约 150 行 C++ 代码，结构清晰易维护
+    \item \textbf{质量稳定}：所有数据集均获得显著线长优化（初始随机布局 $\to$ 最终收敛，优化幅度 40\%\textasciitilde60\%）
+    \item \textbf{双策略扰动}：交换 + 移动组合兼顾局部精细调优与全局探索
+    \item \textbf{增量代价计算}：避免每次迭代全量重算 HPWL，大数据集效率提升显著
+    \item \textbf{100\% 合法性}：所有输出通过 \texttt{reportValid()} 0 错误验证，Block-Instance 双向联动完全正确
+\end{enumerate}
+
+\subsection{方法缺点}
+
+\begin{enumerate}[label=(\arabic*), leftmargin=*]
+    \item \textbf{运行时间}：大型数据集（huge, $\sim$2000 实例）约需 2.9M 次迭代，仍有优化空间
+    \item \textbf{参数敏感性}：SA 效果依赖初始温度和冷却策略，不同数据集可能需要微调
+    \item \textbf{串行实现}：未利用多核并行加速，多起点 SA 可并行运行
+    \item \textbf{初始解随机}：若采用贪心构造（如按连接度排序优先放置），可能加速收敛
+\end{enumerate}
+
+\subsection{下一步改进方向}
+
+\begin{enumerate}[label=(\arabic*), leftmargin=*]
+    \item \textbf{自适应温度调度}：根据当前接受率动态调整冷却系数，高温区快速降温、低温区精细搜索
+    \item \textbf{聚类引导布局}：利用 Net 连接信息对高连接度 Instance 预分组，缩小搜索空间
+    \item \textbf{多起点并行 SA}：从多个随机初始解出发并行运行，取最优结果
+    \item \textbf{与解析法结合}：先用二次布局（Quadratic Placement）获得全局初始解，再用 SA 精细优化
+    \item \textbf{HPWL 缓存优化}：缓存每个 Net 的当前 HPWL 值，交换时仅更新受影响的 Net 缓存，进一步减少重复计算
+\end{enumerate}
+
+% ==================== 附录 ====================
+\appendix
+\section{编译和运行命令}
+
+\subsection*{编译}
+\begin{verbatim}
+g++ -std=c++17 -O2 -o main main.cpp Arch.cpp Global.cpp Object.cpp Solution.cpp
+\end{verbatim}
+
+\subsection*{运行}
+\begin{verbatim}
+./main benchmark/small.txt output/small_placement.txt
+./main benchmark/med1.txt  output/med1_placement.txt
+./main benchmark/med2.txt  output/med2_placement.txt
+./main benchmark/lg1.txt   output/lg1_placement.txt
+./main benchmark/lg2.txt   output/lg2_placement.txt
+./main benchmark/xl.txt    output/xl_placement.txt
+./main benchmark/huge.txt  output/huge_placement.txt
+\end{verbatim}
+
+\end{document}

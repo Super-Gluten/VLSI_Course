@@ -15,21 +15,14 @@
 #include "SiteType.h"
 
 // ============================================================================
-// SA 布局求解器 — 支持 ISPD2016 资源约束
+// SA 布局求解器 — 支持 ISPD2016 资源约束 + 多实例/站点 (z坐标 BEL)
 // ============================================================================
 class Solution {
 private:
-    ISPDDatabase* db_;  // 持有数据库的指针
+    ISPDDatabase* db_;
 
-    // 可移动 instance 列表 (排除 fixed)
+    // 可移动 instance 列表
     std::vector<ISPDInstance*> movable_insts_;
-
-    // 每个 movable instance 当前占用的 site 坐标
-    // movable_insts_[i] 当前在 occupied_sites_[i]
-    std::vector<ISPDSite*> occupied_sites_;
-
-    // 空闲 site 列表 (按类型分组，加速查找)
-    std::map<SiteType, std::vector<ISPDSite*>> free_sites_;
 
     // 随机数引擎
     std::mt19937 rng_;
@@ -41,7 +34,10 @@ private:
     int initial_hpwl_ = 0;
     int iter_count_ = 0;
     int accepted_count_ = 0;
-    int rejected_legal_count_ = 0;  // 因不合法被拒绝的次数
+    int rejected_legal_count_ = 0;
+
+    // 为每种 SITE 类型缓存兼容的 cell 类型列表
+    std::map<SiteType, std::vector<std::string>> site_compatible_cells_;
 
     // ============================================================
     // 核心函数
@@ -51,30 +47,38 @@ private:
     bool isLegalPlacement(const ISPDInstance* inst,
                           const ISPDSite* site) const;
 
-    // 检查将 inst 放到 site 的 z 坐标是否合法 (BEL 约束)
-    bool isLegalBEL(const ISPDInstance* inst,
-                    const ISPDSite* site,
-                    int target_z) const;
+    // 在指定 site 中找一个空闲的 BEL (z 坐标)，返回 -1 表示无空闲
+    int findFreeBEL(const ISPDSite* site,
+                    const ISPDInstance* inst) const;
 
-    // 初始布局：为每个 movable instance 分配一个合法的 site
+    // 在 (cx, cy) 附近搜索兼容的 site + free BEL
+    // radius 控制搜索半径，返回 true 表示找到
+    bool searchNearbyBEL(int cx, int cy,
+                         const ISPDInstance* inst,
+                         int& out_x, int& out_y, int& out_z,
+                         int max_radius = 10) const;
+
+    // 初始布局：为所有 movable instance 分配 (x, y, z)
+    // 每个站点可容纳多个实例（通过 BEL 打包）
     bool constructInitialPlacement();
 
-    // 计算指定 net 集合的 HPWL (增量计算用)
+    // 计算指定 net 集合的 HPWL
     int computeNetsHPWL(const std::set<ISPDNet*>& nets) const;
 
     // 计算所有 net 的总 HPWL
     int computeTotalHPWL() const;
 
-    // 执行一次交换: 将 inst 从 old_site 移到 new_site
-    void doMove(ISPDInstance* inst, ISPDSite* old_site, ISPDSite* new_site);
+    // 移动实例: 将 inst 从当前位置移到 target_site 的 target_z 位置
+    void doMove(ISPDInstance* inst, ISPDSite* target_site, int target_z);
 
 public:
     Solution(ISPDDatabase* db)
         : db_(db)
-        , rng_(std::chrono::steady_clock::now().time_since_epoch().count()) {}
+        , rng_(std::chrono::steady_clock::now().time_since_epoch().count()) {
+        initCompatibleCells();
+    }
 
-    // 主入口：执行 SA 布局
-    // 返回 0 表示成功
+    // 主入口
     int solve();
 
     // 获取结果统计
@@ -84,6 +88,10 @@ public:
     int getIterCount() const { return iter_count_; }
     int getAcceptedCount() const { return accepted_count_; }
     int getRejectedLegalCount() const { return rejected_legal_count_; }
+
+private:
+    // 初始化兼容 cell 类型缓存
+    void initCompatibleCells();
 };
 
 #endif // SOLUTION_H

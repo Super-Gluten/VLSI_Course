@@ -32,7 +32,15 @@
 *.app
 
 # build file
-/build
+*/build
+
+# output file
+*/output
+
+# compile file
+*/lab_main
+*/main
+*/logs
 
 # ========== LaTeX 中间文件 ==========
 *.aux
@@ -50,7 +58,7 @@
 *.dvi
 *.ps
 
-# ========== 测试文件 ==========
+# ========== 测试文件 (大文件，不上传) ==========
 /testbench
 
 # ========== vscode 配置文件 ==========

@@ -16,8 +16,8 @@
 
 # ---------- 编译器与标志 ----------
 CXX      := g++
-CXXFLAGS := -Wall -Wextra -std=c++17 -O2 -g
-LDFLAGS  :=
+CXXFLAGS := -Wall -Wextra -std=c++17 -O2 -g -fopenmp
+LDFLAGS  := -fopenmp
 
 # ---------- 目录 ----------
 SRC_DIR  := .

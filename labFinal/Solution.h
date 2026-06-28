@@ -71,6 +71,9 @@ private:
     // 移动实例: 将 inst 从当前位置移到 target_site 的 target_z 位置
     void doMove(ISPDInstance* inst, ISPDSite* target_site, int target_z);
 
+    // 力导向布局优化
+    int forceDirectedPlacement();
+
 public:
     Solution(ISPDDatabase* db)
         : db_(db)
